@@ -54,12 +54,6 @@ go run . -daily -offline -last 10 -days 30
 
 워크플로 실패 및 마지막 성공 시각을 확인해야 한다. GitHub Actions 스케줄은 지연·누락될 수 있으며 공개 저장소의 장기간 비활동 시 비활성화될 수 있다. 스냅샷은 우선 무기한 보관한다.
 
-로컬에서 직접 수집할 때도 시간 제한이 적용되며 캐시를 사용하지 않는다. 선택적으로 `GITHUB_TOKEN`을 지정하면 API rate limit을 완화할 수 있다.
-
-```sh
-go run . -collect
-```
-
 ## 빌드 및 누적 출력 예시
 
 ```sh
