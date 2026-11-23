@@ -4,20 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/tidwall/gjson"
 )
-
-type release struct {
-	Organization string
-	Repository   string
-}
 
 type ArtifactDownload struct {
 	TagVersion    string
@@ -28,12 +19,72 @@ type ArtifactDownload struct {
 
 func main() {
 	recentLimit := 10
+	days := 30
+	var daily, collect, offline, refresh bool
+	var dataDir string
 	flag.IntVar(&recentLimit, "last", recentLimit, "Limit the number of recent releases to display")
+	flag.IntVar(&days, "days", days, "Number of completed UTC days to display")
+	flag.BoolVar(&daily, "daily", false, "Display approximate daily download counts")
+	flag.BoolVar(&collect, "collect", false, "Collect a daily snapshot without using the cache")
+	flag.BoolVar(&offline, "offline", false, "Read daily snapshots without updating them")
+	flag.BoolVar(&refresh, "refresh", false, "Force an update of daily snapshots")
+	flag.StringVar(&dataDir, "data-dir", "", "Data directory for the cache and snapshots (default: ~/.config/neo-count)")
 	flag.Parse()
 
-	rels, cached, err := CountDownloads("machbase", "neo-server")
+	if offline && (!daily || collect) {
+		exitError(fmt.Errorf("-offline requires -daily"))
+	}
+	if refresh && (!daily || collect || offline) {
+		exitError(fmt.Errorf("-refresh requires -daily and cannot be used with -offline"))
+	}
+	if dataDir == "" {
+		explicit := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "data-dir" {
+				explicit = true
+			}
+		})
+		if explicit {
+			exitError(fmt.Errorf("-data-dir must not be empty"))
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			exitError(fmt.Errorf("determine home directory: %w", err))
+		}
+		dataDir = filepath.Join(home, ".config", "neo-count")
+	}
+
+	if daily || collect {
+		if daily && collect {
+			exitError(fmt.Errorf("-daily and -collect cannot be used together"))
+		}
+		if recentLimit <= 0 || days <= 0 {
+			exitError(fmt.Errorf("-last and -days must be positive"))
+		}
+		var err error
+		if collect {
+			err = withStatsLock(dataDir, func() error {
+				return collectSnapshot(dataDir, time.Now, os.Getenv("GITHUB_TOKEN"))
+			})
+		} else {
+			err = withStatsLock(dataDir, func() error {
+				if !offline {
+					if err := refreshStats(dataDir, statsRemote, time.Now, refresh); err != nil {
+						return err
+					}
+				}
+				return printDaily(os.Stdout, dataDir, recentLimit, days, time.Now())
+			})
+		}
+		if err != nil {
+			exitError(err)
+		}
+		return
+	}
+
+	rels, cached, err := CountDownloads("machbase", "neo-server", dataDir)
 	if err != nil {
-		panic(err.Error())
+		exitError(err)
 	}
 	isCached := func() string {
 		if cached {
@@ -52,7 +103,7 @@ func main() {
 		srcTotal := 0
 		artifacts := make([]ArtifactDownload, 0, 6)
 		for _, a := range r.Assets {
-			toks := strings.Split(strings.TrimSuffix(a.Name, ".zip"), "-")
+			toks := assetTokens(a.Name)
 			if len(toks) < 5 {
 				// src downloads, not packages
 				srcTotal += int(a.DownloadCount)
@@ -106,102 +157,51 @@ func main() {
 	fmt.Println("Total Downloads:", totalDownloadCount+totalSrcDownloadCount, "package:", totalDownloadCount, "src.zip:", totalSrcDownloadCount)
 }
 
-func CountDownloads(organization string, repository string) ([]*Release, bool, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	path := filepath.Join(home, ".config", "neo-download-count")
+func assetTokens(name string) []string {
+	return strings.Split(strings.TrimSuffix(name, ".zip"), "-")
+}
+
+func exitError(err error) {
+	fmt.Fprintln(os.Stderr, "neo-count:", err)
+	os.Exit(1)
+}
+
+func CountDownloads(organization string, repository string, dataDir string) ([]*Release, bool, error) {
+	path := filepath.Join(dataDir, "cache", "releases.json")
 	if stat, err := os.Stat(path); err == nil && time.Since(stat.ModTime()) < time.Hour {
-		fd, _ := os.Open(path)
-		defer fd.Close()
-		dec := json.NewDecoder(fd)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false, fmt.Errorf("read cache: %w", err)
+		}
 		ret := make([]*Release, 0)
-		if err := dec.Decode(&ret); err == nil {
+		if err := json.Unmarshal(data, &ret); err == nil {
 			return ret, true, nil
 		}
+		fmt.Fprintln(os.Stderr, "neo-count: invalid cache; fetching releases again")
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, false, fmt.Errorf("stat cache: %w", err)
 	}
 
-	releases := make([]*Release, 0)
-	pg := 1
-	for {
-		path := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100&page=%d", organization, repository, pg)
-
-	redirected:
-		req, err := http.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		if err != nil {
-			return nil, false, err
-		}
-
-		rsp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, false, err
-		}
-		defer rsp.Body.Close()
-
-		if rsp.StatusCode == http.StatusMovedPermanently || rsp.StatusCode == http.StatusTemporaryRedirect {
-			loc, err := rsp.Location()
-			if err != nil {
-				return nil, false, err
-			}
-			path = loc.String()
-			goto redirected
-		}
-		if rsp.StatusCode != http.StatusOK {
-			return nil, false, err
-		}
-
-		buff, err := io.ReadAll(rsp.Body)
-		if err != nil {
-			return nil, false, err
-		}
-		payload := string(buff)
-
-		rs := gjson.Get(payload, "@this").Array()
-		if len(rs) == 0 {
-			break
-		} else {
-			pg += 1
-		}
-
-		for _, r := range rs {
-			rel := Release{}
-			rel.TagName = r.Get("tag_name").Str
-			rel.PublishedAt = r.Get("published_at").Str
-			rel.Name = r.Get("name").Str
-			rel.Draft = r.Get("draft").Bool()
-			rel.PreRelease = r.Get("prerelease").Bool()
-			rel.Assets = make([]*Asset, 0)
-			releases = append(releases, &rel)
-
-			assets := r.Get("assets").Array()
-			for _, entry := range assets {
-				asset := Asset{}
-				asset.Name = entry.Get("name").Str
-				asset.DownloadCount = entry.Get("download_count").Int()
-				asset.Size = entry.Get("size").Int()
-				asset.ContentType = entry.Get("content_type").Str
-				asset.State = entry.Get("state").Str
-				asset.CreatedAt = entry.Get("created_at").Str
-				asset.UpdatedAt = entry.Get("updated_at").Str
-				asset.DownloadUrl = entry.Get("browser_download_url").Str
-				rel.Assets = append(rel.Assets, &asset)
-			}
-		}
+	releases, err := fetchReleases("https://api.github.com", organization, repository, "", false)
+	if err != nil {
+		return nil, false, err
 	}
-
-	fd, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	defer fd.Close()
-	enc := json.NewEncoder(fd)
-	enc.SetIndent("", "  ")
-	enc.Encode(releases)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, false, fmt.Errorf("create cache directory: %w", err)
+	}
+	data, err := json.MarshalIndent(releases, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("encode cache: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return nil, false, fmt.Errorf("write cache: %w", err)
+	}
 
 	return releases, false, nil
 }
 
 type Release struct {
+	ID          int64
 	Name        string
 	TagName     string
 	PublishedAt string
@@ -211,6 +211,7 @@ type Release struct {
 }
 
 type Asset struct {
+	ID            int64
 	Name          string
 	DownloadCount int64
 	Size          int64

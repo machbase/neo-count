@@ -1,0 +1,23 @@
+# Go build and test outputs
+neo-count
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Local Go workspace
+go.work
+go.work.sum
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+
+# Local plan
+PLAN.md
