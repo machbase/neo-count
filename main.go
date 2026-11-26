@@ -23,7 +23,7 @@ func main() {
 	var daily, collect, offline, refresh bool
 	var dataDir string
 	flag.IntVar(&recentLimit, "last", recentLimit, "Limit the number of recent releases to display")
-	flag.IntVar(&days, "days", days, "Number of completed UTC days to display")
+	flag.IntVar(&days, "days", days, "Number of completed KST days to display")
 	flag.BoolVar(&daily, "daily", false, "Display approximate daily download counts")
 	flag.BoolVar(&collect, "collect", false, "Collect a daily snapshot without using the cache")
 	flag.BoolVar(&offline, "offline", false, "Read daily snapshots without updating them")

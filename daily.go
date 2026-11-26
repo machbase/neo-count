@@ -32,6 +32,9 @@ func dailyCount(start, end *snapshot, selected *Release, day time.Time) string {
 	if start == nil || end == nil {
 		return "N/A (missing or invalid snapshot)"
 	}
+	if !snapshotInWindow(start) || !snapshotInWindow(end) {
+		return "N/A (late snapshot)"
+	}
 	after := releaseByID(end, selected.ID)
 	if after == nil {
 		return "N/A (release missing)"
@@ -114,10 +117,13 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 	if latest == nil {
 		return fmt.Errorf("no valid snapshots in %s", path)
 	}
-	boundary := time.Date(latest.StartedAt.UTC().Year(), latest.StartedAt.UTC().Month(), latest.StartedAt.UTC().Day(), 0, 0, 0, 0, time.UTC)
-	fmt.Fprintf(w, "Approximate daily package downloads (UTC); latest snapshot %s–%s\n", latest.StartedAt.UTC().Format(time.RFC3339), latest.EndedAt.UTC().Format(time.RFC3339))
-	if !now.UTC().Before(boundary.AddDate(0, 0, 1).Add(statsScheduleOffset)) {
-		fmt.Fprintf(w, "Warning: latest snapshot is stale (boundary %s UTC)\n", boundary.Format(snapshotTime))
+	boundary := statsDay(latest.StartedAt)
+	fmt.Fprintf(w, "Approximate daily package downloads (KST); latest snapshot %s–%s\n", latest.StartedAt.In(statsZone).Format(time.RFC3339), latest.EndedAt.In(statsZone).Format(time.RFC3339))
+	if !snapshotInWindow(latest) {
+		fmt.Fprintln(w, "Warning: latest snapshot completed after 00:30 KST")
+	}
+	if !now.Before(boundary.AddDate(0, 0, 1).Add(statsScheduleOffset)) {
+		fmt.Fprintf(w, "Warning: latest snapshot is stale (boundary %s KST)\n", boundary.Format(snapshotTime))
 	}
 	selected := make([]*Release, 0, limit)
 	for _, r := range latest.Releases {
@@ -160,11 +166,11 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 		rows = append(rows, row{day, start, end})
 	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprint(table, "Date (UTC)")
+	fmt.Fprint(table, "Date (KST)")
 	for _, r := range selected {
 		fmt.Fprintf(table, "\t%s", r.TagName)
 	}
-	fmt.Fprintln(table, "\tObservation interval (UTC)")
+	fmt.Fprintln(table, "\tObservation interval (KST)")
 	for _, row := range rows {
 		fmt.Fprint(table, row.day.Format(snapshotTime))
 		for _, r := range selected {
@@ -172,7 +178,7 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 		}
 		interval := "unavailable"
 		if row.start != nil && row.end != nil {
-			interval = row.start.EndedAt.UTC().Format(time.RFC3339) + " to " + row.end.EndedAt.UTC().Format(time.RFC3339)
+			interval = row.start.EndedAt.In(statsZone).Format(time.RFC3339) + " to " + row.end.EndedAt.In(statsZone).Format(time.RFC3339)
 		}
 		fmt.Fprintf(table, "\t%s\n", interval)
 	}

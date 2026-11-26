@@ -24,13 +24,13 @@ func testTime(s string) time.Time {
 }
 
 func testSnapshot(date string, count int64) *snapshot {
-	start := testTime(date + "T00:07:00Z")
+	start := testTime(date + "T00:07:00+09:00")
 	return &snapshot{
 		Version: 1, Owner: statsOwner, Repo: statsRepo,
 		StartedAt: start, EndedAt: start.Add(time.Minute),
 		Releases: []*Release{{
-			ID: 1, TagName: "v1", PublishedAt: "2025-01-01T00:00:00Z",
-			Assets: []*Asset{{ID: 1, Name: "neo-server-v1-linux-amd64.zip", DownloadCount: count, CreatedAt: "2025-01-01T00:00:00Z"}},
+			ID: 1, TagName: "v1", PublishedAt: "2025-01-01T00:00:00+09:00",
+			Assets: []*Asset{{ID: 1, Name: "neo-server-v1-linux-amd64.zip", DownloadCount: count, CreatedAt: "2025-01-01T00:00:00+09:00"}},
 		}},
 	}
 }
@@ -59,13 +59,45 @@ func TestSnapshotStoreLatestAndWindow(t *testing.T) {
 		t.Fatalf("load latest: snapshot=%v err=%v", got, err)
 	}
 	late := testSnapshot("2026-01-02", 20)
-	late.EndedAt = testTime("2026-01-02T00:30:01Z")
-	if _, err := storeSnapshot(dir, late); err == nil {
-		t.Fatal("late snapshot accepted")
+	late.StartedAt = testTime("2026-01-02T08:19:00+09:00")
+	late.EndedAt = testTime("2026-01-02T08:20:00+09:00")
+	if changed, err := storeSnapshot(dir, late); err != nil || changed {
+		t.Fatalf("late snapshot replaced an on-time snapshot: changed=%v err=%v", changed, err)
 	}
 	got, err = loadSnapshot(path)
 	if err != nil || got.Releases[0].Assets[0].DownloadCount != 15 {
-		t.Fatal("failed collection changed the stored snapshot")
+		t.Fatal("late collection changed the stored snapshot")
+	}
+}
+
+func TestSnapshotStoreLatePrefersEarliest(t *testing.T) {
+	dir := t.TempDir()
+	late := testSnapshot("2026-01-02", 20)
+	late.StartedAt = testTime("2026-01-02T08:19:00+09:00")
+	late.EndedAt = testTime("2026-01-02T08:20:00+09:00")
+	if changed, err := storeSnapshot(dir, late); err != nil || !changed {
+		t.Fatalf("late snapshot: changed=%v err=%v", changed, err)
+	}
+	later := *late
+	later.StartedAt = late.StartedAt.Add(time.Hour)
+	later.EndedAt = late.EndedAt.Add(time.Hour)
+	if changed, err := storeSnapshot(dir, &later); err != nil || changed {
+		t.Fatalf("later snapshot: changed=%v err=%v", changed, err)
+	}
+	earlier := *late
+	earlier.StartedAt = late.StartedAt.Add(-time.Hour)
+	earlier.EndedAt = late.EndedAt.Add(-time.Hour)
+	if changed, err := storeSnapshot(dir, &earlier); err != nil || !changed {
+		t.Fatalf("earlier late snapshot: changed=%v err=%v", changed, err)
+	}
+	onTime := testSnapshot("2026-01-02", 15)
+	if changed, err := storeSnapshot(dir, onTime); err != nil || !changed {
+		t.Fatalf("on-time snapshot: changed=%v err=%v", changed, err)
+	}
+	crossMidnight := *late
+	crossMidnight.EndedAt = testTime("2026-01-03T00:00:00+09:00")
+	if _, err := storeSnapshot(dir, &crossMidnight); err == nil {
+		t.Fatal("cross-midnight snapshot accepted")
 	}
 }
 
@@ -89,7 +121,7 @@ func TestSnapshotMissingDownloadCount(t *testing.T) {
 func TestDailyCounts(t *testing.T) {
 	start := testSnapshot("2026-01-02", 10)
 	end := testSnapshot("2026-01-03", 15)
-	day := testTime("2026-01-02T00:00:00Z")
+	day := testTime("2026-01-02T00:00:00+09:00")
 	selected := end.Releases[0]
 	if got := dailyCount(start, end, selected, day); got != "5" {
 		t.Fatalf("increase: %s", got)
@@ -104,24 +136,24 @@ func TestDailyCounts(t *testing.T) {
 	}
 	end.Releases[0].Assets[0].DownloadCount = 15
 	end.Releases[0].Assets = append(end.Releases[0].Assets, &Asset{
-		ID: 2, Name: "neo-server-v1-linux-arm64.zip", DownloadCount: 3, CreatedAt: "2026-01-02T12:00:00Z",
+		ID: 2, Name: "neo-server-v1-linux-arm64.zip", DownloadCount: 3, CreatedAt: "2026-01-02T12:00:00+09:00",
 	})
 	if got := dailyCount(start, end, selected, day); got != "8" {
 		t.Fatalf("new asset: %s", got)
 	}
-	end.Releases[0].Assets[1].CreatedAt = "2026-01-01T12:00:00Z"
+	end.Releases[0].Assets[1].CreatedAt = "2026-01-01T12:00:00+09:00"
 	if got := dailyCount(start, end, selected, day); !strings.Contains(got, "uncertain") {
 		t.Fatalf("uncertain asset: %s", got)
 	}
 	end.Releases[0].Assets = end.Releases[0].Assets[1:]
-	end.Releases[0].Assets[0].CreatedAt = "2026-01-02T12:00:00Z"
+	end.Releases[0].Assets[0].CreatedAt = "2026-01-02T12:00:00+09:00"
 	if got := dailyCount(start, end, selected, day); !strings.Contains(got, "removed or replaced") {
 		t.Fatalf("replacement: %s", got)
 	}
 	if got := dailyCount(nil, end, selected, day); !strings.Contains(got, "missing") {
 		t.Fatalf("missing snapshot: %s", got)
 	}
-	selected.PublishedAt = "2026-01-03T12:00:00Z"
+	selected.PublishedAt = "2026-01-03T12:00:00+09:00"
 	if got := dailyCount(start, end, selected, day); got != "—" {
 		t.Fatalf("not published: %s", got)
 	}
@@ -131,15 +163,55 @@ func TestDailyNewRelease(t *testing.T) {
 	start := testSnapshot("2026-01-02", 10)
 	end := testSnapshot("2026-01-03", 15)
 	end.Releases[0].ID = 2
-	end.Releases[0].PublishedAt = "2026-01-02T12:00:00Z"
-	end.Releases[0].Assets[0].CreatedAt = "2026-01-02T12:01:00Z"
-	day := testTime("2026-01-02T00:00:00Z")
+	end.Releases[0].PublishedAt = "2026-01-02T12:00:00+09:00"
+	end.Releases[0].Assets[0].CreatedAt = "2026-01-02T12:01:00+09:00"
+	day := testTime("2026-01-02T00:00:00+09:00")
 	if got := dailyCount(start, end, end.Releases[0], day); got != "15" {
 		t.Fatalf("new release: %s", got)
 	}
-	end.Releases[0].PublishedAt = "2026-01-01T12:00:00Z"
+	end.Releases[0].PublishedAt = "2026-01-01T12:00:00+09:00"
 	if got := dailyCount(start, end, end.Releases[0], day); !strings.Contains(got, "release missing") {
 		t.Fatalf("old release absent from start: %s", got)
+	}
+}
+
+func TestDailyLateSnapshot(t *testing.T) {
+	start := testSnapshot("2026-01-02", 10)
+	end := testSnapshot("2026-01-03", 15)
+	day := testTime("2026-01-02T00:00:00+09:00")
+	for _, late := range []*snapshot{start, end} {
+		original := late.EndedAt
+		late.EndedAt = late.StartedAt.Add(24 * time.Minute)
+		if got := dailyCount(start, end, end.Releases[0], day); got != "N/A (late snapshot)" {
+			t.Fatalf("late boundary: %s", got)
+		}
+		late.EndedAt = original
+	}
+	end.EndedAt = testTime("2026-01-03T00:30:00+09:00")
+	if got := dailyCount(start, end, end.Releases[0], day); got != "5" {
+		t.Fatalf("boundary at 00:30: %s", got)
+	}
+}
+
+func TestDailyOutputWithLateSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	start := testSnapshot("2026-01-02", 10)
+	end := testSnapshot("2026-01-03", 15)
+	end.StartedAt = testTime("2026-01-03T08:19:00+09:00")
+	end.EndedAt = testTime("2026-01-03T08:20:00+09:00")
+	for _, s := range []*snapshot{start, end} {
+		if _, err := storeSnapshot(filepath.Join(dir, "download-stats"), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := printDaily(&out, dir, 1, 1, testTime("2026-01-03T08:21:00+09:00")); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Warning: latest snapshot completed after 00:30 KST", "2026-01-02", "N/A (late snapshot)", "2026-01-03T08:20:00+09:00"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -151,7 +223,7 @@ func TestDailyOutputAndMissingBoundary(t *testing.T) {
 		}
 	}
 	var out bytes.Buffer
-	if err := printDaily(&out, dir, 10, 3, testTime("2026-01-06T00:00:00Z")); err != nil {
+	if err := printDaily(&out, dir, 10, 3, testTime("2026-01-06T00:00:00+09:00")); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -177,8 +249,8 @@ func TestDailyStaleWarningAfterSchedule(t *testing.T) {
 		at   string
 		want bool
 	}{
-		{"2026-01-02T00:06:59Z", false},
-		{"2026-01-02T00:07:00Z", true},
+		{"2026-01-02T00:06:59+09:00", false},
+		{"2026-01-02T00:07:00+09:00", true},
 	} {
 		var out bytes.Buffer
 		if err := printDaily(&out, dir, 1, 1, testTime(tt.at)); err != nil {
@@ -209,18 +281,6 @@ func TestDailyCLI(t *testing.T) {
 	}
 }
 
-func TestCollectionOutsideWindow(t *testing.T) {
-	dir := t.TempDir()
-	err := collectSnapshot(dir, func() time.Time { return testTime("2026-01-02T00:31:00Z") }, "")
-	if err == nil {
-		t.Fatal("late collection succeeded")
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("late collection created files: %v, %v", entries, err)
-	}
-}
-
 type testRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -231,14 +291,15 @@ func TestCollectionDataDir(t *testing.T) {
 	oldClient := githubClient
 	t.Cleanup(func() { githubClient = oldClient })
 	githubClient = &http.Client{Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
-		body := `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00Z","assets":[]}]`
+		body := `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00+09:00","assets":[]}]`
 		if strings.HasSuffix(req.URL.Path, "/assets") {
-			body = `[{"id":1,"name":"neo-server-v1-linux-amd64.zip","download_count":10,"created_at":"2025-01-01T00:00:00Z"}]`
+			body = `[{"id":1,"name":"neo-server-v1-linux-amd64.zip","download_count":10,"created_at":"2025-01-01T00:00:00+09:00"}]`
 		}
+
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	dir := t.TempDir()
-	now := func() time.Time { return testTime("2026-01-02T00:07:00Z") }
+	now := func() time.Time { return testTime("2026-01-02T00:07:00+09:00") }
 	if err := collectSnapshot(dir, now, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -248,13 +309,31 @@ func TestCollectionDataDir(t *testing.T) {
 	}
 }
 
+func TestCollectionAfterScheduledWindow(t *testing.T) {
+	oldClient := githubClient
+	t.Cleanup(func() { githubClient = oldClient })
+	githubClient = &http.Client{Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`[]`)), Header: make(http.Header), Request: req}, nil
+	})}
+	dir := t.TempDir()
+	now := func() time.Time { return testTime("2026-01-02T08:19:00+09:00") }
+	if err := collectSnapshot(dir, now, ""); err != nil {
+		t.Fatalf("late collection: %v", err)
+	}
+	path := filepath.Join(dir, "download-stats", "snapshots", "2026-01-02.json")
+	s, err := loadSnapshot(path)
+	if err != nil || snapshotInWindow(s) {
+		t.Fatalf("late snapshot: %v, %v", s, err)
+	}
+}
+
 func TestCacheDataDir(t *testing.T) {
 	oldClient := githubClient
 	t.Cleanup(func() { githubClient = oldClient })
 	requests := 0
 	githubClient = &http.Client{Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
 		requests++
-		body := `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00Z","assets":[]}]`
+		body := `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00+09:00","assets":[]}]`
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	dir := t.TempDir()
@@ -347,7 +426,7 @@ func TestFetchReleasesPagesAssetsAndErrors(t *testing.T) {
 
 		switch r.URL.Path {
 		case "/repos/test/repo/releases":
-			fmt.Fprint(w, `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00Z","assets":[]}]`)
+			fmt.Fprint(w, `[{"id":1,"tag_name":"v1","published_at":"2025-01-01T00:00:00+09:00","assets":[]}]`)
 		case "/repos/test/repo/releases/1/assets":
 			if r.URL.Query().Get("page") == "2" {
 				if fail {

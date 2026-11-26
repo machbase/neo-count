@@ -37,7 +37,7 @@ func testStatsCommit(t *testing.T, dir string, repo *git.Repository, s *snapshot
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := filepath.Join("snapshots", s.StartedAt.UTC().Format(snapshotTime)+".json")
+	name := filepath.Join("snapshots", s.StartedAt.In(statsZone).Format(snapshotTime)+".json")
 	if _, err := worktree.Add(name); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSyncStatsCloneAndUpdate(t *testing.T) {
 		t.Fatalf("update: %v", err)
 	}
 	var out bytes.Buffer
-	if err := printDaily(&out, dir, 10, 2, testTime("2026-01-03T00:10:00Z")); err != nil {
+	if err := printDaily(&out, dir, 10, 2, testTime("2026-01-03T00:10:00+09:00")); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"2026-01-01  5", "2026-01-02  3"} {
@@ -218,16 +218,16 @@ func TestNeedsStatsRefresh(t *testing.T) {
 		hasExpected bool
 		want        bool
 	}{
-		{"before schedule", "2026-01-02T00:06:59Z", "2026-01-01T00:35:00Z", true, false},
-		{"previous check not final", "2026-01-02T00:06:59Z", "2026-01-01T00:34:59Z", true, true},
-		{"schedule reached", "2026-01-02T00:07:00Z", "2026-01-02T00:06:59Z", true, true},
-		{"within retry interval", "2026-01-02T00:11:59Z", "2026-01-02T00:07:00Z", true, false},
-		{"retry interval reached", "2026-01-02T00:12:00Z", "2026-01-02T00:07:00Z", true, true},
-		{"final check", "2026-01-02T00:35:00Z", "2026-01-02T00:34:59Z", true, true},
-		{"after final check", "2026-01-02T23:59:59Z", "2026-01-02T00:35:00Z", true, false},
-		{"missing snapshot retry wait", "2026-01-02T00:39:59Z", "2026-01-02T00:35:00Z", false, false},
-		{"missing snapshot retry", "2026-01-02T00:40:00Z", "2026-01-02T00:35:00Z", false, true},
-		{"future check", "2026-01-02T00:35:00Z", "2026-01-02T00:36:00Z", true, true},
+		{"before schedule", "2026-01-02T00:06:59+09:00", "2026-01-01T00:35:00+09:00", true, false},
+		{"previous check not final", "2026-01-02T00:06:59+09:00", "2026-01-01T00:34:59+09:00", true, true},
+		{"schedule reached", "2026-01-02T00:07:00+09:00", "2026-01-02T00:06:59+09:00", true, true},
+		{"within retry interval", "2026-01-02T00:11:59+09:00", "2026-01-02T00:07:00+09:00", true, false},
+		{"retry interval reached", "2026-01-02T00:12:00+09:00", "2026-01-02T00:07:00+09:00", true, true},
+		{"final check", "2026-01-02T00:35:00+09:00", "2026-01-02T00:34:59+09:00", true, true},
+		{"after final check", "2026-01-02T23:59:59+09:00", "2026-01-02T00:35:00+09:00", true, false},
+		{"missing snapshot retry wait", "2026-01-02T00:39:59+09:00", "2026-01-02T00:35:00+09:00", false, false},
+		{"missing snapshot retry", "2026-01-02T00:40:00+09:00", "2026-01-02T00:35:00+09:00", false, true},
+		{"future check", "2026-01-02T00:35:00+09:00", "2026-01-02T00:36:00+09:00", true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,7 +249,7 @@ func TestRefreshStatsScheduleAndFailure(t *testing.T) {
 	remoteDir, remote := testStatsRepo(t)
 	testStatsCommit(t, remoteDir, remote, testSnapshot("2026-01-01", 10))
 	dir := t.TempDir()
-	if err := refreshForTest(dir, remoteDir, "2026-01-01T00:36:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-01T00:36:00+09:00"); err != nil {
 		t.Fatalf("initial clone: %v", err)
 	}
 	statePath := filepath.Join(dir, ".download-stats-sync.json")
@@ -262,10 +262,10 @@ func TestRefreshStatsScheduleAndFailure(t *testing.T) {
 	if err := os.Rename(gitPath, offlinePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:06:59Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:06:59+09:00"); err != nil {
 		t.Fatalf("before schedule should use local data: %v", err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:07:00Z"); err == nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:07:00+09:00"); err == nil {
 		t.Fatal("unavailable remote should fail after schedule")
 	}
 	after, err := os.ReadFile(statePath)
@@ -276,7 +276,7 @@ func TestRefreshStatsScheduleAndFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	testStatsCommit(t, remoteDir, remote, testSnapshot("2026-01-02", 15))
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:07:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:07:00+09:00"); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	path := filepath.Join(dir, "download-stats", "snapshots", "2026-01-02.json")
@@ -287,26 +287,26 @@ func TestRefreshStatsScheduleAndFailure(t *testing.T) {
 	later.StartedAt = later.StartedAt.Add(time.Minute)
 	later.EndedAt = later.EndedAt.Add(time.Minute)
 	testStatsCommit(t, remoteDir, remote, later)
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:11:59Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:11:59+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := loadSnapshot(path); err != nil || s.Releases[0].Assets[0].DownloadCount != 15 {
 		t.Fatalf("fetched before retry interval: %v", err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:12:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:12:00+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := loadSnapshot(path); err != nil || s.Releases[0].Assets[0].DownloadCount != 18 {
 		t.Fatalf("updated snapshot not fetched: %v", err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:34:59Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:34:59+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	final := testSnapshot("2026-01-02", 20)
 	final.StartedAt = final.StartedAt.Add(22 * time.Minute)
 	final.EndedAt = final.EndedAt.Add(22 * time.Minute)
 	testStatsCommit(t, remoteDir, remote, final)
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:35:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:35:00+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := loadSnapshot(path); err != nil || s.Releases[0].Assets[0].DownloadCount != 20 {
@@ -315,11 +315,11 @@ func TestRefreshStatsScheduleAndFailure(t *testing.T) {
 	if err := os.Rename(gitPath, offlinePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T23:59:59Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T23:59:59+09:00"); err != nil {
 		t.Fatalf("after final check should use local data: %v", err)
 	}
 	if err := withStatsLock(dir, func() error {
-		return refreshStats(dir, remoteDir, func() time.Time { return testTime("2026-01-02T23:59:59Z") }, true)
+		return refreshStats(dir, remoteDir, func() time.Time { return testTime("2026-01-02T23:59:59+09:00") }, true)
 	}); err == nil {
 		t.Fatal("forced refresh should contact the unavailable remote")
 	}
@@ -329,7 +329,7 @@ func TestRefreshStatsMissingAndDirtyCheckout(t *testing.T) {
 	remoteDir, remote := testStatsRepo(t)
 	testStatsCommit(t, remoteDir, remote, testSnapshot("2026-01-01", 10))
 	dir := t.TempDir()
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:36:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:36:00+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	gitPath := filepath.Join(remoteDir, ".git")
@@ -337,24 +337,24 @@ func TestRefreshStatsMissingAndDirtyCheckout(t *testing.T) {
 	if err := os.Rename(gitPath, offlinePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:40:59Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:40:59+09:00"); err != nil {
 		t.Fatalf("should wait before retry: %v", err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:41:00Z"); err == nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:41:00+09:00"); err == nil {
 		t.Fatal("missing snapshot should trigger a retry")
 	}
 	if err := os.Rename(offlinePath, gitPath); err != nil {
 		t.Fatal(err)
 	}
 	testStatsCommit(t, remoteDir, remote, testSnapshot("2026-01-02", 15))
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:41:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:41:00+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "download-stats", "snapshots", "2026-01-02.json")
 	if err := os.WriteFile(path, []byte("local change"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:42:00Z"); err == nil || !strings.Contains(err.Error(), "local changes") {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:42:00+09:00"); err == nil || !strings.Contains(err.Error(), "local changes") {
 		t.Fatalf("dirty cached checkout accepted: %v", err)
 	}
 }
@@ -363,7 +363,7 @@ func TestRefreshStatsInvalidState(t *testing.T) {
 	remoteDir, remote := testStatsRepo(t)
 	testStatsCommit(t, remoteDir, remote, testSnapshot("2026-01-01", 10))
 	dir := t.TempDir()
-	if err := refreshForTest(dir, remoteDir, "2026-01-01T00:36:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-01T00:36:00+09:00"); err != nil {
 		t.Fatal(err)
 	}
 	statePath := filepath.Join(dir, ".download-stats-sync.json")
@@ -375,13 +375,13 @@ func TestRefreshStatsInvalidState(t *testing.T) {
 	if err := os.Rename(gitPath, offlinePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:05:00Z"); err == nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:05:00+09:00"); err == nil {
 		t.Fatal("invalid state should force a remote check")
 	}
 	if err := os.Rename(offlinePath, gitPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:05:00Z"); err != nil {
+	if err := refreshForTest(dir, remoteDir, "2026-01-02T00:05:00+09:00"); err != nil {
 		t.Fatalf("invalid state recovery: %v", err)
 	}
 	state, err := os.ReadFile(statePath)

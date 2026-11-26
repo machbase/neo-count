@@ -10,12 +10,22 @@ import (
 )
 
 const (
-	statsOwner   = "machbase"
-	statsRepo    = "neo-server"
-	snapshotTime = "2006-01-02"
+	statsOwner     = "machbase"
+	statsRepo      = "neo-server"
+	snapshotTime   = "2006-01-02"
+	snapshotWindow = 30 * time.Minute
 )
 
+// statsZone is the fixed KST zone that defines the daily boundary; KST has no DST.
+var statsZone = time.FixedZone("KST", 9*60*60)
+
 var errIncompatibleSnapshot = errors.New("incompatible snapshot")
+
+// statsDay returns midnight KST of the KST calendar day containing t.
+func statsDay(t time.Time) time.Time {
+	t = t.In(statsZone)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, statsZone)
+}
 
 type snapshot struct {
 	Version   int        `json:"version"`
@@ -30,9 +40,8 @@ func validateSnapshot(s *snapshot) error {
 	if s.Version != 1 || s.Owner != statsOwner || s.Repo != statsRepo {
 		return fmt.Errorf("%w: version %d, repository %s/%s", errIncompatibleSnapshot, s.Version, s.Owner, s.Repo)
 	}
-	start, end := s.StartedAt.UTC(), s.EndedAt.UTC()
-	boundary := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
-	if s.StartedAt.IsZero() || end.Before(start) || end.After(boundary.Add(30*time.Minute)) {
+	boundary := statsDay(s.StartedAt)
+	if s.StartedAt.IsZero() || s.EndedAt.Before(s.StartedAt) || !s.EndedAt.Before(boundary.AddDate(0, 0, 1)) {
 		return fmt.Errorf("invalid collection time")
 	}
 	if s.Releases == nil {
@@ -55,6 +64,10 @@ func validateSnapshot(s *snapshot) error {
 		}
 	}
 	return nil
+}
+
+func snapshotInWindow(s *snapshot) bool {
+	return !s.EndedAt.After(statsDay(s.StartedAt).Add(snapshotWindow))
 }
 
 func loadSnapshot(path string) (*snapshot, error) {
@@ -86,7 +99,7 @@ func loadSnapshot(path string) (*snapshot, error) {
 	if err := validateSnapshot(&s); err != nil {
 		return nil, err
 	}
-	if filepath.Base(path) != s.StartedAt.UTC().Format(snapshotTime)+".json" {
+	if filepath.Base(path) != s.StartedAt.In(statsZone).Format(snapshotTime)+".json" {
 		return nil, fmt.Errorf("snapshot date does not match filename")
 	}
 	return &s, nil
@@ -97,10 +110,14 @@ func storeSnapshot(dir string, s *snapshot) (bool, error) {
 		return false, err
 	}
 	dir = filepath.Join(dir, "snapshots")
-	path := filepath.Join(dir, s.StartedAt.UTC().Format(snapshotTime)+".json")
+	path := filepath.Join(dir, s.StartedAt.In(statsZone).Format(snapshotTime)+".json")
 	previous, err := loadSnapshot(path)
-	if err == nil && !s.EndedAt.After(previous.EndedAt) {
-		return false, nil
+	if err == nil {
+		currentInWindow, previousInWindow := snapshotInWindow(s), snapshotInWindow(previous)
+		if previousInWindow && (!currentInWindow || !s.EndedAt.After(previous.EndedAt)) ||
+			!previousInWindow && !currentInWindow && !s.EndedAt.Before(previous.EndedAt) {
+			return false, nil
+		}
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("read existing snapshot %s: %w", path, err)
@@ -136,10 +153,6 @@ func storeSnapshot(dir string, s *snapshot) (bool, error) {
 
 func collectSnapshot(dir string, now func() time.Time, token string) error {
 	started := now().UTC()
-	boundary := time.Date(started.Year(), started.Month(), started.Day(), 0, 0, 0, 0, time.UTC)
-	if started.After(boundary.Add(30 * time.Minute)) {
-		return fmt.Errorf("collection must start and finish between 00:00 and 00:30 UTC")
-	}
 	releases, err := fetchReleases("https://api.github.com", statsOwner, statsRepo, token, true)
 	if err != nil {
 		return err
@@ -150,9 +163,12 @@ func collectSnapshot(dir string, now func() time.Time, token string) error {
 		return fmt.Errorf("store snapshot: %w", err)
 	}
 	if changed {
-		fmt.Printf("Stored snapshot %s (%s to %s)\n", started.Format(snapshotTime), s.StartedAt.Format(time.RFC3339), s.EndedAt.Format(time.RFC3339))
+		fmt.Printf("Stored snapshot %s (%s to %s)\n", started.In(statsZone).Format(snapshotTime), s.StartedAt.In(statsZone).Format(time.RFC3339), s.EndedAt.In(statsZone).Format(time.RFC3339))
+		if !snapshotInWindow(s) {
+			fmt.Fprintln(os.Stderr, "Warning: snapshot completed after 00:30 KST; daily counts using it will be unavailable")
+		}
 	} else {
-		fmt.Println("A newer or identical snapshot already exists")
+		fmt.Println("A preferred or identical snapshot already exists")
 	}
 	return nil
 }

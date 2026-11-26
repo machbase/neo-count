@@ -31,11 +31,11 @@ type syncState struct {
 }
 
 func needsStatsRefresh(now, checked time.Time, hasExpected bool) bool {
-	now, checked = now.UTC(), checked.UTC()
+	now, checked = now.In(statsZone), checked.In(statsZone)
 	if checked.IsZero() || checked.After(now) {
 		return true
 	}
-	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	day := statsDay(now)
 	scheduled, final := day.Add(statsScheduleOffset), day.Add(statsFinalOffset)
 	if now.Before(scheduled) {
 		if checked.Before(day.AddDate(0, 0, -1).Add(statsFinalOffset)) {
@@ -88,7 +88,7 @@ func refreshStats(dir, remoteURL string, now func() time.Time, force bool) error
 		if state.CheckedAt.After(current) {
 			fmt.Fprintln(os.Stderr, "neo-count: statistics sync time is in the future; checking the remote")
 		}
-		day := time.Date(current.Year(), current.Month(), current.Day(), 0, 0, 0, 0, time.UTC)
+		day := statsDay(current)
 		if current.Before(day.Add(statsScheduleOffset)) {
 			day = day.AddDate(0, 0, -1)
 		}

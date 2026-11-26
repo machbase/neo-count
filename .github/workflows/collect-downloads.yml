@@ -2,7 +2,11 @@ name: Collect download statistics
 
 on:
   schedule:
-    - cron: '7 0 * * *'
+    # Multiple attempts inside the 00:00-00:30 KST (15:00-15:30 UTC) window
+    # because GitHub may delay or drop individual scheduled events.
+    - cron: '7 15 * * *'
+    - cron: '17 15 * * *'
+    - cron: '27 15 * * *'
   workflow_dispatch:
 
 permissions:
