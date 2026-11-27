@@ -159,6 +159,20 @@ func TestDailyCounts(t *testing.T) {
 	}
 }
 
+func TestFormatDailyValue(t *testing.T) {
+	for _, tt := range []struct {
+		value, want string
+	}{
+		{"1234567", "1,234,567"},
+		{"N/A (late snapshot)", "N/A"},
+		{"—", "—"},
+	} {
+		if got := formatDailyValue(tt.value); got != tt.want {
+			t.Errorf("formatDailyValue(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestDailyNewRelease(t *testing.T) {
 	start := testSnapshot("2026-01-02", 10)
 	end := testSnapshot("2026-01-03", 15)
@@ -208,7 +222,10 @@ func TestDailyOutputWithLateSnapshot(t *testing.T) {
 	if err := printDaily(&out, dir, 1, 1, testTime("2026-01-03T08:21:00+09:00")); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Warning: latest snapshot completed after 00:30 KST", "2026-01-02", "N/A (late snapshot)", "2026-01-03T08:20:00+09:00"} {
+	for _, want := range []string{
+		"Warning: latest snapshot completed after 00:30 KST",
+		"2026-01-02", "N/A", "late snapshot", "01-02 00:08 to 01-03 08:20",
+	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
@@ -223,14 +240,21 @@ func TestDailyOutputAndMissingBoundary(t *testing.T) {
 		}
 	}
 	var out bytes.Buffer
-	if err := printDaily(&out, dir, 10, 3, testTime("2026-01-06T00:00:00+09:00")); err != nil {
+	if err := printDaily(&out, dir, 10, 4, testTime("2026-01-06T00:00:00+09:00")); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"stale", "2026-01-01", "5", "2026-01-02", "2026-01-03", "N/A (missing or invalid snapshot)", "v1"} {
+	for _, want := range []string{
+		"stale", "2026-01-01", "5", "2026-01-02", "2026-01-03",
+		"Warning: 2 required snapshots missing (2025-12-31 through 2026-01-03)",
+		"N/A", "missing or invalid snapshot", "v1",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Count(text, "required snapshots missing") != 1 {
+		t.Errorf("missing snapshots were not summarized once:\n%s", text)
 	}
 	for _, line := range strings.Split(text, "\n") {
 		fields := strings.Fields(line)

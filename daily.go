@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -80,6 +81,21 @@ func dailyCount(start, end *snapshot, selected *Release, day time.Time) string {
 	return fmt.Sprint(total)
 }
 
+func formatDailyValue(value string) string {
+	if strings.HasPrefix(value, "N/A (") {
+		return "N/A"
+	}
+	count, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return value
+	}
+	digits := strconv.FormatInt(count, 10)
+	for i := len(digits) - 3; i > 0; i -= 3 {
+		digits = digits[:i] + "," + digits[i:]
+	}
+	return digits
+}
+
 func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 	if limit <= 0 || days <= 0 {
 		return fmt.Errorf("-last and -days must be positive")
@@ -118,7 +134,9 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 		return fmt.Errorf("no valid snapshots in %s", path)
 	}
 	boundary := statsDay(latest.StartedAt)
-	fmt.Fprintf(w, "Approximate daily package downloads (KST); latest snapshot %s–%s\n", latest.StartedAt.In(statsZone).Format(time.RFC3339), latest.EndedAt.In(statsZone).Format(time.RFC3339))
+	fmt.Fprintf(w, "Approximate daily package downloads (KST)\nLatest snapshot: %s to %s KST\n",
+		latest.StartedAt.In(statsZone).Format("2006-01-02 15:04"),
+		latest.EndedAt.In(statsZone).Format("2006-01-02 15:04"))
 	if !snapshotInWindow(latest) {
 		fmt.Fprintln(w, "Warning: latest snapshot completed after 00:30 KST")
 	}
@@ -133,6 +151,8 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 		selected = append(selected, r)
 	}
 	cache := map[string]*snapshot{boundary.Format(snapshotTime): latest}
+	missing := make(map[string]bool)
+	var warnings []string
 	load := func(date time.Time) (*snapshot, error) {
 		key := date.Format(snapshotTime)
 		if s, ok := cache[key]; ok {
@@ -143,7 +163,11 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 			return nil, fmt.Errorf("%s: %w", key, err)
 		}
 		if err != nil {
-			fmt.Fprintf(w, "Warning: snapshot %s unavailable: %v\n", key, err)
+			if errors.Is(err, os.ErrNotExist) {
+				missing[key] = true
+			} else {
+				warnings = append(warnings, fmt.Sprintf("Warning: invalid snapshot %s: %v", key, err))
+			}
 		}
 		cache[key] = s
 		return s, nil
@@ -165,22 +189,52 @@ func printDaily(w io.Writer, dir string, limit, days int, now time.Time) error {
 		}
 		rows = append(rows, row{day, start, end})
 	}
+	for _, warning := range warnings {
+		fmt.Fprintln(w, warning)
+	}
+	if len(missing) > 0 {
+		dates := make([]string, 0, len(missing))
+		for date := range missing {
+			dates = append(dates, date)
+		}
+		sort.Strings(dates)
+		fmt.Fprintf(w, "Warning: %d required snapshots missing (%s through %s)\n",
+			len(dates), dates[0], dates[len(dates)-1])
+	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprint(table, "Date (KST)")
 	for _, r := range selected {
 		fmt.Fprintf(table, "\t%s", r.TagName)
 	}
-	fmt.Fprintln(table, "\tObservation interval (KST)")
+	fmt.Fprintln(table, "\tSnapshot window (KST)")
+	reasons := make(map[string]bool)
 	for _, row := range rows {
 		fmt.Fprint(table, row.day.Format(snapshotTime))
 		for _, r := range selected {
-			fmt.Fprintf(table, "\t%s", dailyCount(row.start, row.end, r, row.day))
+			value := dailyCount(row.start, row.end, r, row.day)
+			if strings.HasPrefix(value, "N/A (") {
+				reasons[strings.TrimSuffix(strings.TrimPrefix(value, "N/A ("), ")")] = true
+			}
+			fmt.Fprintf(table, "\t%s", formatDailyValue(value))
 		}
 		interval := "unavailable"
 		if row.start != nil && row.end != nil {
-			interval = row.start.EndedAt.In(statsZone).Format(time.RFC3339) + " to " + row.end.EndedAt.In(statsZone).Format(time.RFC3339)
+			interval = row.start.EndedAt.In(statsZone).Format("01-02 15:04") + " to " +
+				row.end.EndedAt.In(statsZone).Format("01-02 15:04")
 		}
 		fmt.Fprintf(table, "\t%s\n", interval)
 	}
-	return table.Flush()
+	if err := table.Flush(); err != nil {
+		return err
+	}
+	if len(reasons) > 0 {
+		ordered := make([]string, 0, len(reasons))
+		for reason := range reasons {
+			ordered = append(ordered, reason)
+		}
+		sort.Strings(ordered)
+		fmt.Fprintf(w, "N/A: %s\n", strings.Join(ordered, "; "))
+	}
+	fmt.Fprintln(w, "— = release not yet published; 0 = no observed increase.")
+	return nil
 }
